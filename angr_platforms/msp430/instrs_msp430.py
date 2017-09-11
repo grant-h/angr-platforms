@@ -26,11 +26,43 @@ OVERFLOW_BIT_IND = 8
 # O: Offset immediate
 
 
+class SrcOperand(DataComponent):
+    def to_asm(self):
+        pass
+
+    def from_asm
+
+
 # Lots of things are going to be interpreted as signed immediates. Here's a quickie to load them
 def bits_to_signed_int(s):
     return Bits(bin=s).int
 
 class MSP430Instruction(Instruction):
+
+    def parse(self, bitstrm):
+        """
+        MSP430 instructions can have one or two extension words for 16 bit immediates
+        We therefore extend the normal parsing so that we make sure we can
+        get another word if we have to.
+        """
+        data = Instruction.parse(self, bitstrm)
+        data['S'] = None
+        data['D'] = None
+        # We don't always have a source or destination.
+        # Theoretically I could put these in the TypeXInstruction classes, but
+        # I'm lazy. Note that we resolve these here, as opposed to later, due to
+        # needing to fiddle with the bitstream.
+        if 's' in data:
+            src_mode = int(data['A'], 2)
+            if (src_mode == ArchMSP430.Mode.INDEXED_MODE and data['s'] != '0011') \
+                    or (data['s'] == '0000' and src_mode == ArchMSP430.Mode.INDIRECT_AUTOINCREMENT_MODE):
+                data['S'] = bitstring.Bits(uint=bitstrm.read('uintle:16'), length=16).bin
+        if 'd' in data:
+            dst_mode = int(data['a'], 2)
+            if dst_mode == ArchMSP430.Mode.INDEXED_MODE:
+                data['D'] = bitstring.Bits(uint=bitstrm.read('uintle:16'), length=16).bin
+        return data
+
 
     # Default flag handling
     def zero(self, *args):
@@ -80,29 +112,9 @@ class MSP430Instruction(Instruction):
             raise ParseError("Invalid opcode, expected %s, got %s" % (self.opcode, data['o']))
         return True
 
-    def parse(self, bitstrm):
-        """
-        MSP430 instructions can have one or two extension words for 16 bit immediates
-        We therefore extend the normal parsing so that we make sure we can
-        get another word if we have to.
-        """
-        data = Instruction.parse(self, bitstrm)
-        data['S'] = None
-        data['D'] = None
-        # We don't always have a source or destination.
-        # Theoretically I could put these in the TypeXInstruction classes, but
-        # I'm lazy. Note that we resolve these here, as opposed to later, due to
-        # needing to fiddle with the bitstream.
-        if 's' in data:
-            src_mode = int(data['A'], 2)
-            if (src_mode == ArchMSP430.Mode.INDEXED_MODE and data['s'] != '0011') \
-                    or (data['s'] == '0000' and src_mode == ArchMSP430.Mode.INDIRECT_AUTOINCREMENT_MODE):
-                data['S'] = bitstring.Bits(uint=bitstrm.read('uintle:16'), length=16).bin
-        if 'd' in data:
-            dst_mode = int(data['a'], 2)
-            if dst_mode == ArchMSP430.Mode.INDEXED_MODE:
-                data['D'] = bitstring.Bits(uint=bitstrm.read('uintle:16'), length=16).bin
-        return data
+    def assemble(self, ins, *ops):
+        self.data = {}
+        self.data['o'] = ins.opcode
 
     def lift(self):
         # The basic flow of an MSP430 instruction:
@@ -118,7 +130,7 @@ class MSP430Instruction(Instruction):
         # 4. Commit
         if retval is not None and self.commit_func is not None:
             self.commit_func(retval)
-        
+
     def compute_flags(self, *args):
         """
         Compute the flags touched by each instruction
@@ -401,6 +413,11 @@ class Type1Instruction(MSP430Instruction):
         src = self.decorate_src(self.data['s'], self.data['A'], self.data['S'], ty)
         return self.addr, self.name, [src, ]
 
+    def assemble(self, ins, *args):
+        MSP430Instruction.assemble(self, ins, *args)
+        self.data['s'], self.data['A'], self.data['S'] = self.encode_src()
+        self.data['b']
+
     @abc.abstractmethod
     def compute_result(self, src):
         pass
@@ -417,6 +434,10 @@ class Type2Instruction(MSP430Instruction):
 
     def disassemble(self):
         return self.addr, self.name, ["$" + str((bits_to_signed_int(self.data['O']) + 1) * 2)]
+
+    def assemble(self, ins, *ops):
+        encodings = {}
+        return encodings
 
     # No flags for all of type2
     def compute_flags(self, *args):
@@ -440,6 +461,10 @@ class Type3Instruction(MSP430Instruction):
         src = self.decorate_src(self.data['s'], self.data['A'], self.data['S'])
         dst = self.decorate_dst(self.data['d'], self.data['a'], self.data['D'])
         return self.addr, self.name, [src, dst]
+
+    def assemble(self, ins, *ops):
+        self.data['s'], self.data['A'], self.data['S'] = self.encode_src()
+        self.data['d'], self.data['a'], self.data['D'] = encode_dst()
 
     @abc.abstractmethod
     def compute_result(self, src, dst):
@@ -557,7 +582,7 @@ class Instruction_CALL(Type1Instruction):
 
     def negative(self, src, ret):
         pass
-    
+
     def zero(self, src, ret):
         pass
 
@@ -601,6 +626,9 @@ class Instruction_MOV(Type3Instruction):
     opcode = '0100'
     name = 'mov'
 
+    aliases = {'RET' : 'MOV @SP+,PC',
+               'BR {dst}'  : 'MOV {dst},PC'}
+
     def disassemble(self):
         # support useful pseudo-ops for disassembly
         addr, name, args = Type3Instruction.disassemble(self)
@@ -626,7 +654,7 @@ class Instruction_MOV(Type3Instruction):
 
     def negative(self, src, dst, ret):
         pass
-    
+
     def zero(self, src, dst, ret):
         pass
 
@@ -656,7 +684,7 @@ class Instruction_ADD(Type3Instruction):
         z = self.zero(src, dst, writeout, retval)
         n = self.negative(src, dst, writeout, retval)
         self.set_flags(z, n, c, o)
-            
+
 
 class Instruction_ADDC(Type3Instruction):
     # dst = src + dst + C
